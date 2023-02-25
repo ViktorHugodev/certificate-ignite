@@ -1,10 +1,11 @@
 import { APIGatewayProxyHandler } from 'aws-lambda'
 import { document } from '../utils/dynamoDbClient'
-import {compile} from 'handlebars'
+import { compile } from 'handlebars'
 import { join } from 'path'
 import { readFileSync } from 'fs'
 import chromium from 'chrome-aws-lambda'
 import dayjs from 'dayjs'
+import { S3 } from 'aws-sdk'
 
 interface ICreateCertificate {
   id: string
@@ -29,16 +30,6 @@ const compileHandlebars = async (data: ITemplate) => {
 export const handler: APIGatewayProxyHandler = async (event) => {
   const { id, name, grade } = JSON.parse(event.body) as ICreateCertificate
 
-  await document.put({
-    TableName: 'users_certificate',
-    Item: {
-      id,
-      name,
-      grade,
-      created_at: new Date().getTime()
-    }
-  }).promise()
-
   const response = await document.query({
     TableName: 'users_certificate',
     KeyConditionExpression: 'id = :id',
@@ -46,6 +37,19 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       ':id': id
     }
   }).promise()
+  const userAlreadyExists = response.Items[0]
+
+  if(!userAlreadyExists) {
+    await document.put({
+      TableName: 'users_certificate',
+      Item: {
+        id,
+        name,
+        grade,
+        created_at: new Date().getTime()
+      }
+    }).promise()
+  }
 
   const medalPath = join(process.cwd(), 'src', 'templates', 'selo.png')
   const medal = readFileSync(medalPath, 'base64')
@@ -54,10 +58,9 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     name,
     id,
     grade,
-    date:dayjs().format('DD/MM/YYYY'),
+    date: dayjs().format('DD/MM/YYYY'),
     medal
   }
-
 
   const content = await compileHandlebars(data)
   const browser = await chromium.puppeteer.launch({
@@ -65,8 +68,6 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     defaultViewport: chromium.defaultViewport,
     executablePath: await chromium.executablePath,
     headless: chromium.headless,
-    ignoreHTTPSErrors: true,
-    // ignoreDefaultArgs: ['--disable-extensions'],
   })
 
   const page = await browser.newPage()
@@ -80,8 +81,20 @@ export const handler: APIGatewayProxyHandler = async (event) => {
   })
 
   await browser.close()
+  const s3 = new S3()
+  await s3.putObject({
+    Bucket: 'certificate-ignite-2023',
+    Key: `${id}-${name}.pdf`,
+    ACL: 'public-read',
+    Body: pdf,
+    ContentType: 'application/pdf'
+  }).promise()
+
   return {
     statusCode: 201,
-    body: JSON.stringify(response.Items[0])
+    body: JSON.stringify({
+      message:'Certificado criado com sucesso!',
+      url:`${id}-${name}.pdf`
+    })
   }
 }
